@@ -1253,6 +1253,53 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 		Handler: r.handleStopAppWithDryRun,
 	}
 
+	// Get app config
+	r.tools["get_app_config"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "get_app_config",
+			Description: "Retrieve the current user-specified configuration for an installed app. Returns the values object that can be modified and passed to update_app.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"app_name": map[string]interface{}{
+						"type":        "string",
+						"description": "Name of the installed application",
+					},
+				},
+				"required": []string{"app_name"},
+			},
+		},
+		Handler: handleGetAppConfig,
+	}
+
+	// Update app
+	r.tools["update_app"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "update_app",
+			Description: "Update an installed app's configuration. Job-based; use tasks_get with returned task_id to track progress. Use get_app_config first to retrieve current config, then pass modified values. Supports dry_run to preview changes. This is a write operation that modifies the system.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"app_name": map[string]interface{}{
+						"type":        "string",
+						"description": "Name of the installed application to update",
+					},
+					"values": map[string]interface{}{
+						"type":        "object",
+						"description": "Updated configuration values. Use get_app_config to retrieve current values first. Storage must use host_path (not ix_volume).",
+					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Preview changes without executing (default: false)",
+						"default":     false,
+					},
+				},
+				"required": []string{"app_name", "values"},
+			},
+		},
+		Handler: r.handleUpdateAppWithDryRun,
+	}
+
 	// Search app catalog
 	r.tools["search_app_catalog"] = Tool{
 		Definition: mcp.Tool{
@@ -3829,6 +3876,142 @@ func (s *stopAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]in
 			fmt.Sprintf("App '%s' (currently %v) will become unavailable after stopping.", appName, currentState),
 		},
 		EstimatedTime: &EstimatedTime{MinSeconds: 5, MaxSeconds: 60, Note: "Depends on app shutdown time"},
+	}, nil
+}
+
+// handleGetAppConfig retrieves the user-specified config for an app
+func handleGetAppConfig(client *truenas.Client, args map[string]interface{}) (string, error) {
+	appName, ok := args["app_name"].(string)
+	if !ok || appName == "" {
+		return "", fmt.Errorf("app_name is required")
+	}
+
+	result, err := client.Call("app.config", appName)
+	if err != nil {
+		return "", fmt.Errorf("failed to get app config: %w", err)
+	}
+
+	var config map[string]interface{}
+	if err := json.Unmarshal(result, &config); err != nil {
+		return "", fmt.Errorf("failed to parse app config: %w", err)
+	}
+
+	response := map[string]interface{}{
+		"app_name": appName,
+		"config":   config,
+	}
+	formatted, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(formatted), nil
+}
+
+// handleUpdateApp performs the actual app.update API call
+func (r *Registry) handleUpdateApp(client *truenas.Client, args map[string]interface{}) (string, error) {
+	appName, ok := args["app_name"].(string)
+	if !ok || appName == "" {
+		return "", fmt.Errorf("app_name is required")
+	}
+
+	values, ok := args["values"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("values is required and must be an object")
+	}
+
+	if err := enforceHostPathStorage(values); err != nil {
+		return "", fmt.Errorf("storage validation failed: %v", err)
+	}
+
+	result, err := client.Call("app.update", appName, map[string]interface{}{
+		"values": values,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to update app: %w", err)
+	}
+
+	var jobID int
+	if err := json.Unmarshal(result, &jobID); err != nil {
+		var jobIDArray []int
+		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
+			return "", fmt.Errorf("failed to parse job ID: int error: %v, array error: %v", err, err2)
+		}
+		if len(jobIDArray) == 0 {
+			return "", fmt.Errorf("app.update returned empty job ID array")
+		}
+		jobID = jobIDArray[0]
+	}
+
+	task, err := r.taskManager.CreateJobTask("update_app", args, jobID, 30*time.Minute)
+	if err != nil {
+		return "", fmt.Errorf("failed to create task: %w", err)
+	}
+
+	response := map[string]interface{}{
+		"app_name":      appName,
+		"task_id":       task.TaskID,
+		"task_status":   task.Status,
+		"poll_interval": task.PollInterval,
+		"job_id":        jobID,
+		"message":       fmt.Sprintf("App update initiated. Track progress with tasks_get using task_id: %s", task.TaskID),
+	}
+	formatted, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to format response: %w", err)
+	}
+	return string(formatted), nil
+}
+
+func (r *Registry) handleUpdateAppWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(client, args, &updateAppDryRun{}, r.handleUpdateApp)
+}
+
+type updateAppDryRun struct{}
+
+func (u *updateAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+	appName, ok := args["app_name"].(string)
+	if !ok || appName == "" {
+		return nil, fmt.Errorf("app_name is required")
+	}
+
+	values, ok := args["values"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("values is required and must be an object")
+	}
+
+	if err := enforceHostPathStorage(values); err != nil {
+		return nil, fmt.Errorf("storage validation failed: %v", err)
+	}
+
+	currentResult, err := client.Call("app.config", appName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current config: %w", err)
+	}
+	var currentConfig map[string]interface{}
+	json.Unmarshal(currentResult, &currentConfig)
+
+	return &DryRunResult{
+		Tool: "update_app",
+		CurrentState: map[string]interface{}{
+			"app_name":       appName,
+			"current_config": currentConfig,
+		},
+		PlannedActions: []PlannedAction{
+			{
+				Step:        1,
+				Description: "Apply new configuration values to app",
+				Operation:   "update",
+				Target:      "app.update",
+				Details: map[string]interface{}{
+					"app_name":   appName,
+					"new_values": values,
+				},
+			},
+		},
+		Warnings: []string{
+			"App containers will be restarted to apply configuration changes.",
+		},
+		EstimatedTime: &EstimatedTime{MinSeconds: 10, MaxSeconds: 300, Note: "Depends on app restart time"},
 	}, nil
 }
 
