@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,13 +19,30 @@ import (
 )
 
 var (
-	truenasURL = flag.String("truenas-url", "", "TrueNAS hostname or WebSocket URL (e.g., 'truenas.local' or 'ws://10.0.0.1/websocket')")
-	apiKey     = flag.String("api-key", "", "TrueNAS API key for middleware authentication")
-	insecure   = flag.Bool("insecure", false, "Skip TLS certificate verification (for self-signed certs)")
-	versionFlg = flag.Bool("version", false, "Print version and exit")
-	debug      = flag.Bool("debug", false, "Enable debug logging")
-	readOnly   = flag.Bool("read-only", false, "Serve only non-mutating tools; refuse everything else (fail-closed allowlist)")
+	truenasURL  = flag.String("truenas-url", "", "TrueNAS hostname or WebSocket URL (e.g., 'truenas.local' or 'ws://10.0.0.1/websocket')")
+	apiKey      = flag.String("api-key", "", "TrueNAS API key. Prefer -api-key-file or TRUENAS_API_KEY: a key passed here is visible in argv to every process on the host")
+	apiKeyFile  = flag.String("api-key-file", "", "Read the API key from this file (first line). Keeps it out of argv and out of the environment")
+	username    = flag.String("username", "", "Username that owns the API key. Required for auth.login_ex; without it the deprecated auth.login_with_api_key is used")
+	insecure    = flag.Bool("insecure", false, "Skip TLS certificate verification (for self-signed certs)")
+	versionFlg  = flag.Bool("version", false, "Print version and exit")
+	debug       = flag.Bool("debug", false, "Enable debug logging")
+	readOnly    = flag.Bool("read-only", false, "Serve only non-mutating tools; refuse everything else (fail-closed allowlist)")
 )
+
+// readKeyFile returns the first line of path. A trailing newline is common in
+// files written by shell redirection, so it is trimmed rather than treated as key
+// material.
+func readKeyFile(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	key := strings.TrimSpace(string(b))
+	if key == "" {
+		return "", fmt.Errorf("%s is empty", path)
+	}
+	return key, nil
+}
 
 const (
 	Version = "0.2.0"
@@ -42,12 +60,32 @@ func main() {
 	if *truenasURL == "" {
 		*truenasURL = os.Getenv("TRUENAS_URL")
 	}
+	if *username == "" {
+		*username = os.Getenv("TRUENAS_USERNAME")
+	}
+	if *apiKeyFile == "" {
+		*apiKeyFile = os.Getenv("TRUENAS_API_KEY_FILE")
+	}
+
+	// Key sources, most private first. A key in argv is world-readable via /proc on
+	// the host, so the file path is preferred and -api-key is a last resort.
+	if *apiKeyFile != "" {
+		key, err := readKeyFile(*apiKeyFile)
+		if err != nil {
+			log.Fatalf("Failed to read -api-key-file: %v", err)
+		}
+		*apiKey = key
+	}
 	if *apiKey == "" {
 		*apiKey = os.Getenv("TRUENAS_API_KEY")
 	}
 
 	if *truenasURL == "" || *apiKey == "" {
-		log.Fatal("Both --truenas-url and --api-key are required (or set TRUENAS_URL and TRUENAS_API_KEY env vars)")
+		log.Fatal("-truenas-url is required, plus one of -api-key-file, -api-key, or TRUENAS_API_KEY")
+	}
+	if *username == "" {
+		log.Println("warning: no -username given; will use the deprecated auth.login_with_api_key " +
+			"(removed in TrueNAS 27). Pass -username to use auth.login_ex.")
 	}
 
 	// Configure TLS - accept self-signed certs by default (common for TrueNAS)
@@ -63,6 +101,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create TrueNAS client: %v", err)
 	}
+	client.SetUsername(*username)
+	client.SetDebug(*debug)
 	defer client.Close()
 
 	// Authenticate with TrueNAS middleware

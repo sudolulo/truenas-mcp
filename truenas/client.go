@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,8 +15,14 @@ import (
 )
 
 type Client struct {
-	endpoint  string
-	apiKey    string
+	endpoint string
+	apiKey   string
+	// username is required by auth.login_ex. When empty the client falls back to
+	// the deprecated auth.login_with_api_key.
+	username string
+	// debug gates verbose wire logging. Even when true, logged frames are passed
+	// through redactForLog so credentials never reach a log file.
+	debug     bool
 	tlsConfig *tls.Config
 
 	// connMu protects conn and authenticated; also gates connect/authenticate
@@ -84,6 +91,14 @@ func NewClient(endpoint, apiKey string, tlsConfig *tls.Config) (*Client, error) 
 	}, nil
 }
 
+// SetUsername sets the username that owns the API key. It is required by
+// auth.login_ex; without it the client uses the deprecated login call.
+func (c *Client) SetUsername(u string) { c.username = u }
+
+// SetDebug enables verbose wire logging. Logged frames are still redacted, so
+// credentials are never written even in debug mode.
+func (c *Client) SetDebug(d bool) { c.debug = d }
+
 // connect establishes the WebSocket connection and starts the read loop.
 // Must be called with connMu held.
 func (c *Client) connect() error {
@@ -122,7 +137,9 @@ func (c *Client) connect() error {
 			Version: "1",
 			Support: []string{"1"},
 		}
-		log.Printf("Sending connect message: %+v", connectMsg)
+		if c.debug {
+			log.Printf("Sending connect message: %+v", connectMsg)
+		}
 		if err := conn.WriteJSON(connectMsg); err != nil {
 			conn.Close()
 			lastErr = fmt.Errorf("failed to send connect message: %w", err)
@@ -136,7 +153,9 @@ func (c *Client) connect() error {
 			lastErr = fmt.Errorf("failed to read connect response: %w", err)
 			continue
 		}
-		log.Printf("Received connect response: %+v", connectResp)
+		if c.debug {
+			log.Printf("Received connect response: %+v", connectResp)
+		}
 
 		if connectResp.Msg != "connected" {
 			conn.Close()
@@ -176,9 +195,12 @@ func (c *Client) readLoop(conn *websocket.Conn) {
 			return
 		}
 
-		respJSON, _ := json.Marshal(resp)
-		log.Printf("Received response: %s", string(respJSON))
-		log.Printf("Result length: %d bytes", len(resp.Result))
+		if c.debug {
+			// Auth responses can carry a session token; redact before logging.
+			respJSON, _ := json.Marshal(resp)
+			log.Printf("Received response: %s", redactForLog(string(respJSON)))
+			log.Printf("Result length: %d bytes", len(resp.Result))
+		}
 
 		// Route response to the waiting caller
 		c.pendingMu.Lock()
@@ -220,14 +242,18 @@ func (c *Client) buildConnectionURLs() ([]string, error) {
 		return []string{c.endpoint}, nil
 	}
 
-	// Otherwise, ONLY use wss:// (secure connection required for API key authentication)
-	hostname := c.endpoint
-	// Remove port if specified (we'll add the correct port)
-	if idx := strings.LastIndex(hostname, ":"); idx != -1 {
-		hostname = hostname[:idx]
+	// Bare "host" or "host:port". Upstream discarded any port given here and forced
+	// 443, which breaks every install whose web UI has been moved off the default --
+	// TrueNAS exposes that as ui_httpsport, and a reverse proxy running on the NAS
+	// commonly takes 443 for itself. Honour an explicit port; default to 443 only
+	// when none was supplied. net.SplitHostPort handles bracketed IPv6 correctly and
+	// returns an error for a bare host, which is exactly the fallback we want.
+	host, port := c.endpoint, "443"
+	if h, p, err := net.SplitHostPort(c.endpoint); err == nil {
+		host, port = h, p
 	}
 
-	return []string{fmt.Sprintf("wss://%s:443/websocket", hostname)}, nil
+	return []string{fmt.Sprintf("wss://%s/websocket", net.JoinHostPort(host, port))}, nil
 }
 
 func (c *Client) Authenticate() error {
@@ -241,7 +267,43 @@ func (c *Client) Authenticate() error {
 
 	log.Println("Authenticating with TrueNAS middleware...")
 
-	// Call auth.login_with_api_key
+	// auth.login_with_api_key is deprecated in TrueNAS 26 and slated for removal in
+	// 27. auth.login_ex (25.04+) is the replacement and still takes an API key, via
+	// the API_KEY_PLAIN mechanism -- API keys themselves are not going away, only
+	// this login call is. It requires the key's owning username, so fall back to the
+	// old call when no username was supplied.
+	if c.username != "" {
+		result, err := c.callRaw("auth.login_ex", map[string]interface{}{
+			"mechanism": "API_KEY_PLAIN",
+			"username":  c.username,
+			"api_key":   c.apiKey,
+		})
+		if err != nil {
+			return fmt.Errorf("authentication failed: %w", err)
+		}
+
+		var resp struct {
+			ResponseType string `json:"response_type"`
+		}
+		if err := json.Unmarshal(result, &resp); err != nil {
+			return fmt.Errorf("failed to parse authentication response: %w", err)
+		}
+		if resp.ResponseType != "SUCCESS" {
+			// Never include the response body: it can echo credential material.
+			return fmt.Errorf("authentication failed: %s", resp.ResponseType)
+		}
+
+		c.connMu.Lock()
+		c.authenticated = true
+		c.connMu.Unlock()
+
+		log.Println("TrueNAS middleware authentication successful (auth.login_ex)")
+		return nil
+	}
+
+	log.Println("warning: no -username given; falling back to auth.login_with_api_key, " +
+		"which is deprecated in TrueNAS 26 and removed in 27")
+
 	result, err := c.callRaw("auth.login_with_api_key", c.apiKey)
 	if err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
@@ -342,8 +404,11 @@ func (c *Client) callRaw(method string, params ...interface{}) (json.RawMessage,
 			Params: params,
 		}
 
-		reqJSON, _ := json.Marshal(req)
-		log.Printf("Sending request: %s", string(reqJSON))
+		if c.debug {
+			// Params carry the API key on auth.login_ex; redact before logging.
+			reqJSON, _ := json.Marshal(req)
+			log.Printf("Sending request: %s", redactForLog(string(reqJSON)))
+		}
 
 		// writeMu ensures only one goroutine writes to the WebSocket at a time
 		c.writeMu.Lock()
