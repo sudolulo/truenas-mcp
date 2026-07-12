@@ -23,6 +23,7 @@ var (
 	insecure   = flag.Bool("insecure", false, "Skip TLS certificate verification (for self-signed certs)")
 	versionFlg = flag.Bool("version", false, "Print version and exit")
 	debug      = flag.Bool("debug", false, "Enable debug logging")
+	readOnly   = flag.Bool("read-only", false, "Serve only non-mutating tools; refuse everything else (fail-closed allowlist)")
 )
 
 const (
@@ -82,6 +83,11 @@ func main() {
 
 	// Create tool registry
 	registry := tools.NewRegistry(client, taskManager)
+	registry.SetReadOnly(*readOnly)
+	if *readOnly {
+		log.Printf("read-only mode: serving %d of %d tools; mutating tools are refused",
+			len(registry.ListTools()), registry.ToolCount())
+	}
 
 	// Start stdio handler
 	handler := NewStdioHandler(registry, *debug)

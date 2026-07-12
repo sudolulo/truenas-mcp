@@ -16,6 +16,7 @@ type Registry struct {
 	client      *truenas.Client
 	taskManager *tasks.Manager
 	tools       map[string]Tool
+	readOnly    bool
 }
 
 type Tool struct {
@@ -1771,19 +1772,34 @@ Returns task_id for tracking progress with tasks_get.
 
 func (r *Registry) ListTools() []mcp.Tool {
 	tools := make([]mcp.Tool, 0, len(r.tools))
-	for _, tool := range r.tools {
+	for name, tool := range r.tools {
+		if !r.allowed(name) {
+			continue
+		}
 		tools = append(tools, tool.Definition)
 	}
 	return tools
 }
 
 func (r *Registry) CallTool(name string, args map[string]interface{}) (string, error) {
+	// Gate before lookup. ListTools already hides refused tools, but a client can
+	// name one anyway, so the boundary is enforced here rather than in the listing.
+	if !r.allowed(name) {
+		return "", fmt.Errorf("tool %q is refused: server is in read-only mode", name)
+	}
+
 	tool, exists := r.tools[name]
 	if !exists {
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
 
-	return tool.Handler(r.client, args)
+	out, err := tool.Handler(r.client, args)
+	if err != nil {
+		return "", err
+	}
+
+	// Unconditional: middleware responses are secret-bearing by default.
+	return RedactJSON(out), nil
 }
 
 // Tool handlers

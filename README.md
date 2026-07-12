@@ -1,9 +1,46 @@
 # TrueNAS MCP Server
 
+> **This is a fork** of [truenas/truenas-mcp](https://github.com/truenas/truenas-mcp), adding a
+> hard `-read-only` mode and unconditional secret redaction. See [Why this fork exists](#why-this-fork-exists).
+> Upstream remains the canonical project; this tracks it and carries a small safety patch.
+
 > **⚠️ Research Preview**
 > This project is in active development and released as a research preview. APIs and features may change. Not recommended for production use.
 
 A Model Context Protocol (MCP) server for TrueNAS that enables AI models to interact with the TrueNAS API using natural language queries.
+
+## Why this fork exists
+
+Two problems make upstream unsafe to point at a NAS that hosts anything you care about.
+
+**1. `system_reboot` has no confirmation.** It is registered with an empty input schema — no
+`dry_run`, no argument of any kind — and its handler calls `system.reboot` immediately. A model can
+reboot the host in one unconfirmed tool call. Upstream's README claims *"Dry-Run Mode — Preview
+changes before execution for all write operations."* That is not accurate: dry-run is **opt-in per
+call**, and `ExecuteWithDryRun()` falls straight through to real execution when the argument is
+absent. It is a hint, not a boundary.
+
+**2. `get_app_config` returns credentials verbatim.** It calls `app.config` and returns the app's
+entire configuration map — database passwords, encryption keys, Redis passwords, API tokens — into
+the model's context, and from there into a transcript that persists indefinitely.
+
+This fork adds:
+
+- **`-read-only`** — a **fail-closed allowlist**. The server serves 31 non-mutating tools and refuses
+  the other 21, including anything upstream adds later that we have not reviewed. A denylist of
+  known-bad names would silently admit the next `system_reboot`; an allowlist cannot. Refused tools
+  are hidden from `tools/list` *and* rejected at dispatch, so naming one directly does not work.
+- **Unconditional secret redaction** — every tool response is walked and credential-shaped fields are
+  masked, in read-write mode too. There is no legitimate reason for a password to reach the model, and
+  "the operator remembered to field-filter" is not a control.
+
+```sh
+truenas-mcp --truenas-url 192.168.1.10 --api-key "$TRUENAS_API_KEY" --read-only
+```
+
+Both behaviours are covered by tests in [`tools/readonly_test.go`](tools/readonly_test.go), which
+assert against the live upstream registry — so if upstream renames or removes a tool, the test fails
+loudly rather than quietly widening the boundary.
 
 ## Table of Contents
 
@@ -43,7 +80,11 @@ TrueNAS MCP provides comprehensive management capabilities through natural langu
 
 ### Key Capabilities
 - **Intelligent Filtering & Sorting** - Query datasets, snapshots, VMs with smart filters
-- **Dry-Run Mode** - Preview changes before execution for all write operations
+- **Read-Only Mode** - `-read-only` serves only non-mutating tools and refuses the rest (fail-closed)
+- **Secret Redaction** - credential-shaped fields are masked in every tool response
+- **Dry-Run Mode** - opt-in per call via `"dry_run": true`, and supported by *some* write operations.
+  It is not a safety boundary: a call that omits the argument executes for real, and `system_reboot`
+  accepts no arguments at all. Use `-read-only` if you need a boundary.
 - **Task Tracking** - Automatic progress monitoring for updates, upgrades, and scrubs
 - **Safety Checks** - Built-in validation prevents dangerous operations
 - **Natural Language** - Ask questions in plain English, get actionable insights

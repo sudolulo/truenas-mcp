@@ -1,0 +1,23 @@
+truenas-mcp (fork)
+==================
+
+This is a fork of truenas/truenas-mcp (https://github.com/truenas/truenas-mcp),
+copyright iXsystems, Inc. and contributors, licensed under GPL-3.0. The upstream
+license applies unchanged to this fork; see LICENSE.
+
+Upstream authorship is preserved in the git history. The fork's own changes are
+confined to:
+
+  tools/readonly.go        read-only mode (fail-closed tool allowlist)
+  tools/redact.go          unconditional secret redaction
+  tools/readonly_test.go   tests for both
+  tools/registry.go        gating hooked into ListTools / CallTool
+  cmd/truenas-mcp/main.go  -read-only flag
+  README.md, CHANGELOG.md  fork documentation
+
+AI disclosure
+-------------
+
+The fork's changes listed above were written with Claude Code, and reviewed
+before commit. Upstream code is unmodified apart from the registry and main
+hooks noted above.
