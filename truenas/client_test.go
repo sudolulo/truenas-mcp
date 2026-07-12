@@ -4,7 +4,9 @@ import "testing"
 
 // Upstream discarded any port supplied with the host and hardcoded 443. TrueNAS
 // exposes the UI port as ui_httpsport, and a reverse proxy on the NAS commonly
-// claims 443, so a fixed 443 makes the server unusable on such a host.
+// claims 443, so a fixed 443 makes the server unusable on such a host. The path
+// stays /websocket: the client speaks the legacy DDP protocol, which /api/current
+// does not accept (see the note in buildConnectionURLs).
 func TestBuildConnectionURLsHonoursExplicitPort(t *testing.T) {
 	cases := []struct {
 		endpoint string

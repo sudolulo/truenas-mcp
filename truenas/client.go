@@ -252,7 +252,12 @@ func (c *Client) buildConnectionURLs() ([]string, error) {
 	if h, p, err := net.SplitHostPort(c.endpoint); err == nil {
 		host, port = h, p
 	}
-
+	// NOTE ON THE ENDPOINT: this client speaks the legacy DDP-style protocol
+	// ({"msg":"connect"}, {"msg":"method"}), which only the unversioned /websocket
+	// endpoint accepts. The modern /api/current endpoint speaks pure JSON-RPC 2.0
+	// and ignores this handshake -- connecting there just hangs (verified live on
+	// 25.10.4). /websocket still works on 25.10 and through Fangtooth. Moving to
+	// /api/current is a protocol rewrite, not a URL change; tracked as a known issue.
 	return []string{fmt.Sprintf("wss://%s/websocket", net.JoinHostPort(host, port))}, nil
 }
 

@@ -43,6 +43,8 @@ Forked from upstream at `9acb432`.
 
 - `auth.login_with_api_key` is deprecated in TrueNAS 26 and slated for removal in 27; the replacement
   is `auth.login_ex`. Works on Fangtooth; will break on a later upgrade.
-- The WebSocket endpoint is hardcoded to the legacy `wss://<host>:443/websocket` path. The modern
-  endpoint since 25.04 is `/api/current` (JSON-RPC 2.0). There is no flag to select the path, only to
-  pass a whole URL.
+- The client speaks the legacy DDP-style protocol over the unversioned `/websocket` endpoint. The
+  modern endpoint since 25.04 is `/api/current`, which speaks pure JSON-RPC 2.0 and ignores this
+  handshake (connecting there hangs — verified live on 25.10.4). `/websocket` still works on 25.10 and
+  through Fangtooth, so this is not urgent, but migrating to `/api/current` is a protocol rewrite of the
+  connect/method framing, not a URL change. The port, at least, is no longer hardcoded (see Fixed).
