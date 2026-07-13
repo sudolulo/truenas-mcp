@@ -17,6 +17,8 @@ func TestBuildConnectionURLsHonoursExplicitPort(t *testing.T) {
 		{"truenas.local:8443", "wss://truenas.local:8443/websocket"},
 		{"truenas.local", "wss://truenas.local:443/websocket"},
 		{"[fd00::1]:444", "wss://[fd00::1]:444/websocket"},
+		{"[fd00::1]", "wss://[fd00::1]:443/websocket"},   // bracketed IPv6, no port: must not double-bracket
+		{"fd00::1", "wss://[fd00::1]:443/websocket"},     // bare IPv6, no port
 		{"wss://host:9999/websocket", "wss://host:9999/websocket"}, // full URL passes through
 	}
 	for _, tc := range cases {

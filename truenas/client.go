@@ -251,6 +251,13 @@ func (c *Client) buildConnectionURLs() ([]string, error) {
 	host, port := c.endpoint, "443"
 	if h, p, err := net.SplitHostPort(c.endpoint); err == nil {
 		host, port = h, p
+	} else {
+		// No port. If the host is a bracketed IPv6 literal ("[fd00::1]"), strip the
+		// brackets: JoinHostPort re-adds them, and without this we'd emit the
+		// double-bracketed "wss://[[fd00::1]]:443/websocket".
+		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			host = host[1 : len(host)-1]
+		}
 	}
 	// NOTE ON THE ENDPOINT: this client speaks the legacy DDP-style protocol
 	// ({"msg":"connect"}, {"msg":"method"}), which only the unversioned /websocket
@@ -519,24 +526,36 @@ func formatAPIError(apiErr *APIError) error {
 	return fmt.Errorf("%s", errMsg)
 }
 
-// formatAPIErrorWithContext formats API error with request context for debugging
+// formatAPIErrorWithContext formats an API error with request context.
+//
+// SECURITY: the params it echoes are the request's params -- and for auth.login_ex
+// those params ARE the plaintext API key. Upstream serialized them verbatim, so any
+// middleware error frame on the auth call (a bad key, a mid-session reconnect that
+// re-authenticates and fails) produced an error string containing the key. That
+// error reaches two sinks that are not debug-gated: main's log.Fatalf on startup,
+// and -- via CallTool's error return -- the model's context and the transcript. The
+// debug-log redaction added elsewhere did not cover this path.
+//
+// So every serialized blob here goes through redactForLog. The Trace is redacted
+// too: it is middleware-supplied and can echo the request.
 func formatAPIErrorWithContext(apiErr *APIError, method string, params []interface{}) error {
 	errMsg := fmt.Sprintf("API error: %s (code %d)", apiErr.Message, apiErr.Code)
 
 	errMsg = fmt.Sprintf("%s\n\nRequest:\n  Method: %s", errMsg, method)
 
 	if len(params) > 0 {
-		if paramsJSON, err := json.MarshalIndent(params, "  ", "  "); err == nil {
-			errMsg = fmt.Sprintf("%s\n  Params: %s", errMsg, string(paramsJSON))
+		safe := redactParamsForError(method, params)
+		if paramsJSON, err := json.MarshalIndent(safe, "  ", "  "); err == nil {
+			errMsg = fmt.Sprintf("%s\n  Params: %s", errMsg, redactForLog(string(paramsJSON)))
 		}
 	}
 
 	if apiErr.Trace != nil {
 		if traceStr, ok := apiErr.Trace.(string); ok && traceStr != "" {
-			errMsg = fmt.Sprintf("%s\n\nTrace: %s", errMsg, traceStr)
+			errMsg = fmt.Sprintf("%s\n\nTrace: %s", errMsg, redactForLog(traceStr))
 		} else {
 			if traceJSON, err := json.MarshalIndent(apiErr.Trace, "", "  "); err == nil {
-				errMsg = fmt.Sprintf("%s\n\nTrace: %s", errMsg, string(traceJSON))
+				errMsg = fmt.Sprintf("%s\n\nTrace: %s", errMsg, redactForLog(string(traceJSON)))
 			}
 		}
 	}

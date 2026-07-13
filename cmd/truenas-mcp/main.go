@@ -88,12 +88,23 @@ func main() {
 			"(removed in TrueNAS 27). Pass -username to use auth.login_ex.")
 	}
 
-	// Configure TLS - accept self-signed certs by default (common for TrueNAS)
+	// TLS. Upstream set InsecureSkipVerify unconditionally and -insecure only
+	// printed a log line, so certificate verification was ALWAYS off while the flag
+	// advertised itself as the thing that turned it off. That quietly undercut the
+	// reason we hard-reject ws:// at all (client.go): refusing plaintext to protect
+	// the API key means little if the wss:// connection then trusts any certificate,
+	// since an active MITM can present one and capture the key during auth.login_ex.
+	//
+	// Now the flag means what it says: verification is ON unless -insecure is passed.
+	// TrueNAS ships a self-signed cert, so -insecure is genuinely required against a
+	// stock box -- but it is now an explicit, visible choice rather than a silent
+	// default. (Pinning the NAS's cert would be strictly better; not done here.)
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
+		InsecureSkipVerify: *insecure,
 	}
 	if *insecure {
-		log.Println("TLS certificate verification disabled (self-signed certs accepted)")
+		log.Println("WARNING: TLS certificate verification disabled (-insecure). The API key is " +
+			"exposed to an active MITM on this connection.")
 	}
 
 	// Create TrueNAS client
