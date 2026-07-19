@@ -75,13 +75,25 @@ func TestRedactJSONPreservesLargeIntegers(t *testing.T) {
 	}
 }
 
-// Honest documentation of the remaining gap: a secret inside an opaque string blob
-// (a custom app's compose YAML) is NOT caught. This test asserts the CURRENT
-// behaviour so nobody mistakes it for safety -- if someone later fixes it, this
-// test fails loudly and should be updated.
-func TestRedactJSONDoesNotCatchSecretsInsideStringBlobs(t *testing.T) {
-	got := RedactJSON(`{"custom_compose_config_string": "services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: hunter2\n"}`)
-	if !strings.Contains(got, "hunter2") {
-		t.Skip("string-blob redaction now implemented -- update this test and the README's known-limit note")
+// Previously the audit's honestly-documented gap: a secret inside an opaque string
+// blob (a custom app's compose YAML) sailed through because redaction masked by key
+// name only. redactStringBlob now scans the interior of string values, so this is
+// covered -- a POSTGRES_PASSWORD embedded in a compose blob must be masked, while a
+// non-secret line in the same blob survives.
+func TestRedactJSONMasksSecretsInsideStringBlobs(t *testing.T) {
+	got := RedactJSON(`{"custom_compose_config_string": "services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: hunter2\n      TZ: America/New_York\n    ports:\n      - 5432:5432\n"}`)
+	if strings.Contains(got, "hunter2") {
+		t.Errorf("secret inside a compose-YAML string blob survived:\n%s", got)
+	}
+	// The compose-list dotenv form (- KEY=value) must also be caught.
+	got2 := RedactJSON(`{"env_blob": "FOO=bar\nAPI_TOKEN=sk_live_deadbeef\n"}`)
+	if strings.Contains(got2, "sk_live_deadbeef") {
+		t.Errorf("secret inside a KEY=value env blob survived:\n%s", got2)
+	}
+	// Non-secret lines, and structural YAML, must be left intact.
+	for _, keep := range []string{"America/New_York", "services:", "5432:5432", "bar"} {
+		if !strings.Contains(got+got2, keep) {
+			t.Errorf("blob scan destroyed a non-secret line %q:\n%s\n%s", keep, got, got2)
+		}
 	}
 }

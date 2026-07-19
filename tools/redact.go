@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
 	"strings"
 )
 
@@ -19,12 +20,13 @@ import (
 // legitimate reason for a credential to reach the model, and "the operator
 // remembered to field-filter" is not a control.
 //
-// KNOWN LIMIT, stated plainly: this masks by KEY NAME (plus the name/value pair
-// shape below). A secret embedded inside an opaque string -- e.g. a custom app's
-// docker-compose YAML returned as one blob, with `POSTGRES_PASSWORD: hunter2`
-// inside it -- is NOT caught, because the key holding the blob isn't credential-
-// shaped and we will not regex the interior of arbitrary strings. get_app_config on
-// a custom/compose app is therefore not fully safe; prefer query_apps for those.
+// Redaction works on three shapes: by KEY NAME, by the name/value pair shape (see
+// envPairSecret below), and -- for a secret embedded inside an opaque string, e.g. a
+// custom app's docker-compose YAML returned as one blob with `POSTGRES_PASSWORD:
+// hunter2` inside it -- by scanning the interior of string values line by line (see
+// redactStringBlob). The blob scan only touches lines shaped like `key: value` or
+// `key=value` whose key is credential-shaped, so ordinary prose values are left
+// byte-for-byte intact. get_app_config on a custom/compose app is covered by this.
 
 const redactedMarker = "***REDACTED***"
 
@@ -114,9 +116,41 @@ func redactValue(v interface{}) interface{} {
 			out[i] = redactValue(val)
 		}
 		return out
+	case string:
+		return redactStringBlob(node)
 	default:
 		return v
 	}
+}
+
+// blobAssignLine matches a single "key: value" or "key=value" assignment as found
+// inside a compose / env / YAML blob returned as one opaque string. The optional
+// leading "- " covers compose's list-form environment (`- POSTGRES_PASSWORD=...`).
+var blobAssignLine = regexp.MustCompile(`^(\s*-?\s*)([A-Za-z0-9_.\-]+)(\s*[:=]\s*)(.+?)(\s*)$`)
+
+// redactStringBlob masks secret-keyed assignments embedded inside a string value --
+// the docker-compose YAML that get_app_config hands back as one field is the case
+// that matters. A string with no secret-shaped assignment line is returned exactly
+// as given, so ordinary short values and prose are never mangled.
+func redactStringBlob(s string) string {
+	if !strings.ContainsAny(s, ":=") {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	changed := false
+	for i, line := range lines {
+		m := blobAssignLine.FindStringSubmatch(line)
+		if m == nil || !looksSecret(m[2]) {
+			continue
+		}
+		// Preserve indent (m[1]), key (m[2]), and separator (m[3]); drop the value.
+		lines[i] = m[1] + m[2] + m[3] + redactedMarker
+		changed = true
+	}
+	if !changed {
+		return s
+	}
+	return strings.Join(lines, "\n")
 }
 
 // RedactJSON masks credential-looking fields in a JSON document. Input that is

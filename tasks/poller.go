@@ -54,9 +54,30 @@ func (p *Poller) pollAllTasks() {
 	}
 }
 
+// attemptsExhausted records one poll against the task and reports whether the
+// configured MaxPollAttempts cap has been reached. A cap of 0 means unlimited (the
+// default), so this is a no-op unless an operator sets a limit; when the cap is hit
+// the task is failed so GetActive stops returning it and the poll loop lets go.
+func (p *Poller) attemptsExhausted(task *Task) bool {
+	if p.config.MaxPollAttempts <= 0 {
+		return false
+	}
+	task.Attempts++
+	if task.Attempts < p.config.MaxPollAttempts {
+		return false
+	}
+	task.Status = TaskStatusFailed
+	task.StatusMessage = fmt.Sprintf("gave up polling after %d attempts without reaching a terminal state", task.Attempts)
+	p.store.Update(task)
+	return true
+}
+
 // pollJobTask polls a job-based task using core.get_jobs
 func (p *Poller) pollJobTask(task *Task) {
 	if task.JobID == nil {
+		return
+	}
+	if p.attemptsExhausted(task) {
 		return
 	}
 
@@ -84,6 +105,9 @@ func (p *Poller) pollJobTask(task *Task) {
 // pollStatusTask polls a status-based task using custom status endpoint
 func (p *Poller) pollStatusTask(task *Task) {
 	if task.StatusMethod == "" {
+		return
+	}
+	if p.attemptsExhausted(task) {
 		return
 	}
 
