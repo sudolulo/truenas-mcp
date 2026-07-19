@@ -35,6 +35,7 @@ type Task struct {
 
 	// Internal fields (not exposed in JSON)
 	OperationType OperationType          `json:"-"`
+	Attempts      int                    `json:"-"` // Poll attempts so far (for MaxPollAttempts)
 	JobID         *int                   `json:"-"` // For job-based ops
 	StatusMethod  string                 `json:"-"` // For status-based ops
 	ToolName      string                 `json:"-"`
